@@ -331,7 +331,7 @@ def start():
     # Lookback window for the TradingEnv
     # Increasing this too much can result in errors and overfitting, also increases the duration necessary for training
     # Value needs to be bigger than 1, otherwise it will take nothing in consideration
-    window_size = 10
+    window_size = 20
 
     # 1 meaning he cant lose anything 0 meaning it can lose everything
     # Setting a high value results in quicker training time, but could result in overfitting
