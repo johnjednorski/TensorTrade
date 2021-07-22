@@ -1,34 +1,29 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import ray
-import matplotlib.pyplot as plt
-import tensortrade.env.default as default
-import ta
-import tensorflow as tf
-
+import ray.rllib.agents.a3c.a2c as a2c
+import ray.rllib.agents.a3c.a3c as a3c
+import ray.rllib.agents.dqn as dqn
 import ray.rllib.agents.impala as impala
 import ray.rllib.agents.ppo as ppo
 import ray.rllib.agents.ppo.appo as appo
-import ray.rllib.agents.dqn as dqn
-import ray.rllib.agents.a3c.a3c as a3c
-import ray.rllib.agents.a3c.a2c as a2c
-
+import ta
+import tensorflow as tf
+import tensortrade.env.default as default
 from ray import tune
+from ray.rllib.utils.exploration.epsilon_greedy import EpsilonGreedy
 from ray.tune.registry import register_env
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.stopper import ExperimentPlateauStopper
-from ray.rllib.utils.exploration.epsilon_greedy import EpsilonGreedy
-
-from tensortrade.env.default.actions import TensorTradeActionScheme, SimpleOrders, ManagedRiskOrders, BSH
-from tensortrade.env.default.rewards import TensorTradeRewardScheme, SimpleProfit, RiskAdjustedReturns, PBR
-from tensortrade.env.default.renderers import PlotlyTradingChart, FileLogger
-from tensortrade.env.generic import ActionScheme, TradingEnv, Renderer
-from tensortrade.oms.services.execution.simulated import execute_order
-from tensortrade.feed.core import Stream, DataFeed, NameSpace
 from tensortrade.core import Clock
-from tensortrade.oms.instruments import ExchangePair, Instrument
+from tensortrade.env.default.actions import TensorTradeActionScheme, SimpleOrders, ManagedRiskOrders, BSH
+from tensortrade.env.default.renderers import PlotlyTradingChart, FileLogger
+from tensortrade.env.default.rewards import TensorTradeRewardScheme, SimpleProfit, RiskAdjustedReturns, PBR
+from tensortrade.env.generic import ActionScheme, TradingEnv, Renderer
+from tensortrade.feed.core import Stream, DataFeed, NameSpace
 from tensortrade.oms.exchanges import Exchange, ExchangeOptions
-from tensortrade.oms.wallets import Wallet, Portfolio
+from tensortrade.oms.instruments import ExchangePair, Instrument
 from tensortrade.oms.instruments import USD, BTC
 from tensortrade.oms.orders import (
     Order,
@@ -36,8 +31,11 @@ from tensortrade.oms.orders import (
     TradeSide,
     TradeType
 )
-from BinanceData import fetchData
+from tensortrade.oms.services.execution.simulated import execute_order
+from tensortrade.oms.wallets import Wallet, Portfolio
+
 from Benchmark_Comparison import benchmark
+from BinanceData import fetchData
 
 # === Define custom instruments ===
 # Precision of BAT on Binance is 4 (because 4 digits follow the comma)
@@ -48,8 +46,8 @@ NANO = Instrument('NANO', 4, 'Nano')
 trainData = pd.DataFrame()
 testData = pd.DataFrame()
 
-def start(): 
-    
+
+def start():
     # === Coin used in this run ===
     coin = "BTC"
     coinInstrument = BTC
@@ -62,35 +60,35 @@ def start():
     data = candles.add_prefix(coin + ":")
 
     # Divide the data in test (last 20%) and training (first 80%)
-    dataEnd = (int)(len(data)*0.2)
+    data_end = int(len(data) * 0.2)
 
-    trainLength = (len(data) - dataEnd)
+    train_length = (len(data) - data_end)
 
     # Print the amount of rows that are used for training and testing
-    print("Training on " + (str)(trainLength) + " rows")
-    print("Testing on " + (str)(dataEnd) + " rows")
+    print("Training on " + str(train_length) + " rows")
+    print("Testing on " + str(data_end) + " rows")
 
     # Used for benchmark
-    trainData = candles[50:-dataEnd]
-    trainData.set_index('date', inplace = True)
-    testData = candles[-dataEnd:]
-    testData.set_index('date', inplace = True)
-    
+    train_data = candles[50:-data_end]
+    train_data.set_index('date', inplace=True)
+    test_data = candles[-data_end:]
+    test_data.set_index('date', inplace=True)
+
     def create_env(config):
 
         # Use config param to decide which data set to use
         # Reserve 50 rows of data to fill in NaN values
         if config["train"] == True:
-            df = data[50:-dataEnd]
-            envData = candles[50:-dataEnd]
-            taData = data[:-dataEnd]
+            df = data[50:-data_end]
+            env_data = candles[50:-data_end]
+            ta_data = data[:-data_end]
         else:
-            df = data[-dataEnd:]
-            envData = candles[-dataEnd:]
-            taData = data[-dataEnd-50:]
-            
+            df = data[-data_end:]
+            env_data = candles[-data_end:]
+            ta_data = data[-data_end - 50:]
+
         # === OBSERVER ===
-        p =  Stream.source(df[(coin + ':close')].tolist(), dtype="float").rename(("USD-" + coin))
+        p = Stream.source(df[(coin + ':close')].tolist(), dtype="float").rename(("USD-" + coin))
 
         # === EXCHANGE ===
         # Commission on Binance is 0.075% on the lowest level, using BNB (https://www.binance.com/en/fee/schedule)
@@ -108,7 +106,7 @@ def start():
             cash,
             asset
         ])
-        
+
         # === OBSERVER ===
         dataset = pd.DataFrame()
 
@@ -116,22 +114,22 @@ def start():
         # log(current_price / previous_price) = log(current_price) - log(previous_price)
         # If log value below 0 current_price > previous_price
         # Above 0 means current_price < previous_price 
-        dataset['log_open'] = np.log(taData[(coin + ':open')]) - np.log(taData[(coin + ':open')].shift(1))
-        dataset['log_low'] = np.log(taData[(coin + ':low')]) - np.log(taData[(coin + ':low')].shift(1))
-        dataset['log_high'] = np.log(taData[(coin + ':high')]) - np.log(taData[(coin + ':high')].shift(1))
-        dataset['log_close'] = np.log(taData[(coin + ':close')]) - np.log(taData[(coin + ':close')].shift(1))
-        dataset['log_vol'] = np.log(taData[(coin + ':volume')]) - np.log(taData[(coin + ':volume')].shift(1))
+        dataset['log_open'] = np.log(ta_data[(coin + ':open')]) - np.log(ta_data[(coin + ':open')].shift(1))
+        dataset['log_low'] = np.log(ta_data[(coin + ':low')]) - np.log(ta_data[(coin + ':low')].shift(1))
+        dataset['log_high'] = np.log(ta_data[(coin + ':high')]) - np.log(ta_data[(coin + ':high')].shift(1))
+        dataset['log_close'] = np.log(ta_data[(coin + ':close')]) - np.log(ta_data[(coin + ':close')].shift(1))
+        dataset['log_vol'] = np.log(ta_data[(coin + ':volume')]) - np.log(ta_data[(coin + ':volume')].shift(1))
 
         # === TECHNICAL ANALYSIS === 
         # Extra features not described in research, therefore not used.       
-        #BB_low = ta.volatility.BollingerBands(close = taData[(coin + ':close')], window = 20).bollinger_lband()
-        #BB_mid = ta.volatility.BollingerBands(close = taData[(coin + ':close')], window = 20).bollinger_mavg()
-        #BB_high = ta.volatility.BollingerBands(close = taData[(coin + ':close')], window = 20).bollinger_hband()
+        # BB_low = ta.volatility.BollingerBands(close = ta_data[(coin + ':close')], window = 20).bollinger_lband()
+        # BB_mid = ta.volatility.BollingerBands(close = ta_data[(coin + ':close')], window = 20).bollinger_mavg()
+        # BB_high = ta.volatility.BollingerBands(close = ta_data[(coin + ':close')], window = 20).bollinger_hband()
 
         # Difference between close price and bollinger band
-        #dataset['BB_low'] =  np.log(BB_low) - np.log(taData[(coin + ':close')])
-        #dataset['BB_mid'] =  np.log(BB_mid) - np.log(taData[(coin + ':close')])
-        #dataset['BB_high'] =  np.log(BB_high) - np.log(taData[(coin + ':close')])
+        # dataset['BB_low'] =  np.log(BB_low) - np.log(ta_data[(coin + ':close')])
+        # dataset['BB_mid'] =  np.log(BB_mid) - np.log(ta_data[(coin + ':close')])
+        # dataset['BB_high'] =  np.log(BB_high) - np.log(ta_data[(coin + ':close')])
 
         # Take log-returns to standardize
         # Log-returns can not be used if value is 0 or smaller.
@@ -139,77 +137,93 @@ def start():
         # IDEA: Maybe use volume or close to standardize
 
         # This line is necessary otherwise read only errors shows up
-        taData = taData.copy() 
+        ta_data = ta_data.copy()
 
         # For some reasons there are erros when using pct_change() for these indicators
-        adi = ta.volume.AccDistIndexIndicator(high=taData[(coin + ':high')], low=taData[(coin + ':low')], close=taData[(coin + ':close')], volume=taData[(coin + ':volume')]).acc_dist_index()
+        adi = ta.volume.AccDistIndexIndicator(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')],
+                                              close=ta_data[(coin + ':close')],
+                                              volume=ta_data[(coin + ':volume')]).acc_dist_index()
         dataset['adi'] = adi.pct_change()
 
-        fi = ta.volume.ForceIndexIndicator(close=taData[(coin + ':close')], volume=taData[(coin + ':volume')]).force_index()
+        fi = ta.volume.ForceIndexIndicator(close=ta_data[(coin + ':close')],
+                                           volume=ta_data[(coin + ':volume')]).force_index()
         dataset['fi'] = fi.pct_change()
 
-        macd_diff = ta.trend.MACD(close=taData[(coin + ':close')]).macd_diff()
+        macd_diff = ta.trend.MACD(close=ta_data[(coin + ':close')]).macd_diff()
         dataset['macd_diff'] = macd_diff.pct_change()
 
-        dpo = ta.trend.DPOIndicator(close=taData[(coin + ':close')]).dpo()
+        dpo = ta.trend.DPOIndicator(close=ta_data[(coin + ':close')]).dpo()
         dataset['dpo'] = dpo.pct_change()
 
         # Too many outliers in the dataset
-        #vpt = ta.volume.VolumePriceTrendIndicator(close=taData[(coin + ':close')], volume=taData[(coin + ':volume')]).volume_price_trend()
-        #dataset['vpt'] = vpt.pct_change()
-        #em = ta.volume.EaseOfMovementIndicator(high=taData[(coin + ':high')], low=taData[(coin + ':low')], volume=taData[(coin + ':volume')]).ease_of_movement()
-        #dataset['em'] = em.pct_change()
+        # vpt = ta.volume.VolumePriceTrendIndicator(close=ta_data[(coin + ':close')], volume=ta_data[(coin + ':volume')]).volume_price_trend()
+        # dataset['vpt'] = vpt.pct_change()
+        # em = ta.volume.EaseOfMovementIndicator(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')], volume=ta_data[(coin + ':volume')]).ease_of_movement()
+        # dataset['em'] = em.pct_change()
 
-        kst_sig = ta.trend.KSTIndicator(close=taData[(coin + ':close')]).kst_sig()
+        kst_sig = ta.trend.KSTIndicator(close=ta_data[(coin + ':close')]).kst_sig()
         dataset['kst_sig'] = kst_sig.pct_change()
 
-        kst_diff = ta.trend.KSTIndicator(close=taData[(coin + ':close')]).kst_diff()
+        kst_diff = ta.trend.KSTIndicator(close=ta_data[(coin + ':close')]).kst_diff()
         dataset['kst_diff'] = kst_diff.pct_change()
 
-        nvi = ta.volume.NegativeVolumeIndexIndicator(close=taData[(coin + ':close')], volume=taData[(coin + ':volume')]).negative_volume_index()
+        nvi = ta.volume.NegativeVolumeIndexIndicator(close=ta_data[(coin + ':close')],
+                                                     volume=ta_data[(coin + ':volume')]).negative_volume_index()
         dataset['nvi'] = np.log(nvi) - np.log(nvi.shift(1))
 
-        bbw = ta.volatility.BollingerBands(close=taData[(coin + ':close')]).bollinger_wband()
+        bbw = ta.volatility.BollingerBands(close=ta_data[(coin + ':close')]).bollinger_wband()
         dataset['bbw'] = np.log(bbw) - np.log(bbw.shift(1))
 
-        kcw = ta.volatility.KeltnerChannel(high=taData[(coin + ':high')], low=taData[(coin + ':low')], close=taData[(coin + ':close')]).keltner_channel_wband()
+        kcw = ta.volatility.KeltnerChannel(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')],
+                                           close=ta_data[(coin + ':close')]).keltner_channel_wband()
         dataset['kcw'] = np.log(kcw) - np.log(kcw.shift(1))
 
-        dcw = ta.volatility.DonchianChannel(high=taData[(coin + ':high')], low=taData[(coin + ':low')], close=taData[(coin + ':close')]).donchian_channel_wband()
+        dcw = ta.volatility.DonchianChannel(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')],
+                                            close=ta_data[(coin + ':close')]).donchian_channel_wband()
         dataset['dcw'] = np.log(dcw) - np.log(dcw.shift(1))
 
-        psar_up = ta.trend.PSARIndicator(high=taData[(coin + ':high')], low=taData[(coin + ':low')], close=taData[(coin + ':close')]).psar_up()
-        dataset['psar_up'] = np.log(psar_up) - np.log(psar_up.shift(1))      
+        psar_up = ta.trend.PSARIndicator(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')],
+                                         close=ta_data[(coin + ':close')]).psar_up()
+        dataset['psar_up'] = np.log(psar_up) - np.log(psar_up.shift(1))
 
         # These indicators have a mean independent of the OHLCV data
         # IDEA: Use log-returns on these as an extra indicator
         # Has a mean of 0
-        dataset['cmf'] = ta.volume.ChaikinMoneyFlowIndicator(high=taData[(coin + ':high')], low=taData[(coin + ':low')], close=taData[(coin + ':close')], volume=taData[(coin + ':volume')]).chaikin_money_flow()
-        dataset['ppo'] = ta.momentum.PercentagePriceOscillator(close=taData[(coin + ':close')]).ppo()
-        dataset['ppo_signal'] = ta.momentum.PercentagePriceOscillator(close=taData[(coin + ':close')]).ppo_signal()
-        dataset['ppo_hist'] = ta.momentum.PercentagePriceOscillator(close=taData[(coin + ':close')]).ppo_hist()
-        dataset['ui'] = ta.volatility.UlcerIndex(close=taData[(coin + ':close')]).ulcer_index()
-        dataset['aroon_ind'] = ta.trend.AroonIndicator(close=taData[(coin + ':close')]).aroon_indicator()
+        dataset['cmf'] = ta.volume.ChaikinMoneyFlowIndicator(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')],
+                                                             close=ta_data[(coin + ':close')],
+                                                             volume=ta_data[(coin + ':volume')]).chaikin_money_flow()
+        dataset['ppo'] = ta.momentum.PercentagePriceOscillator(close=ta_data[(coin + ':close')]).ppo()
+        dataset['ppo_signal'] = ta.momentum.PercentagePriceOscillator(close=ta_data[(coin + ':close')]).ppo_signal()
+        dataset['ppo_hist'] = ta.momentum.PercentagePriceOscillator(close=ta_data[(coin + ':close')]).ppo_hist()
+        dataset['ui'] = ta.volatility.UlcerIndex(close=ta_data[(coin + ':close')]).ulcer_index()
+        dataset['aroon_ind'] = ta.trend.AroonIndicator(close=ta_data[(coin + ':close')]).aroon_indicator()
 
         # Indicator, so has value 0 or 1
-        dataset['bbhi'] = ta.volatility.BollingerBands(close=taData[(coin + ':close')]).bollinger_hband_indicator()
-        dataset['bbli'] = ta.volatility.BollingerBands(close=taData[(coin + ':close')]).bollinger_lband_indicator()
-        dataset['kchi'] = ta.volatility.KeltnerChannel(high=taData[(coin + ':high')], low=taData[(coin + ':low')], close=taData[(coin + ':close')]).keltner_channel_hband_indicator()
-        dataset['kcli'] = ta.volatility.KeltnerChannel(high=taData[(coin + ':high')], low=taData[(coin + ':low')], close=taData[(coin + ':close')]).keltner_channel_lband_indicator()
+        dataset['bbhi'] = ta.volatility.BollingerBands(close=ta_data[(coin + ':close')]).bollinger_hband_indicator()
+        dataset['bbli'] = ta.volatility.BollingerBands(close=ta_data[(coin + ':close')]).bollinger_lband_indicator()
+        dataset['kchi'] = ta.volatility.KeltnerChannel(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')],
+                                                       close=ta_data[
+                                                           (coin + ':close')]).keltner_channel_hband_indicator()
+        dataset['kcli'] = ta.volatility.KeltnerChannel(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')],
+                                                       close=ta_data[
+                                                           (coin + ':close')]).keltner_channel_lband_indicator()
 
         # Has a mean of 50
-        dataset['stoch_rsi'] = ta.momentum.StochRSIIndicator(close=taData[(coin + ':close')]).stochrsi()
-        dataset['stoch_rsi_d'] = ta.momentum.StochRSIIndicator(close=taData[(coin + ':close')]).stochrsi_d()
-        dataset['stoch_rsi_k'] = ta.momentum.StochRSIIndicator(close=taData[(coin + ':close')]).stochrsi_k()
-        dataset['uo'] = ta.momentum.UltimateOscillator(high=taData[(coin + ':high')], low=taData[(coin + ':low')], close=taData[(coin + ':close')]).ultimate_oscillator()
-        dataset['adx'] = ta.trend.ADXIndicator(high=taData[(coin + ':high')], low=taData[(coin + ':low')], close=taData[(coin + ':close')]).adx()
-        dataset['mass_index'] = ta.trend.MassIndex(high=taData[(coin + ':high')], low=taData[(coin + ':low')]).mass_index()
-        dataset['aroon_up'] = ta.trend.AroonIndicator(close=taData[(coin + ':close')]).aroon_up()
-        dataset['aroon_down'] = ta.trend.AroonIndicator(close=taData[(coin + ':close')]).aroon_down()
-        dataset['stc'] = ta.trend.STCIndicator(close=taData[(coin + ':close')]).stc()
+        dataset['stoch_rsi'] = ta.momentum.StochRSIIndicator(close=ta_data[(coin + ':close')]).stochrsi()
+        dataset['stoch_rsi_d'] = ta.momentum.StochRSIIndicator(close=ta_data[(coin + ':close')]).stochrsi_d()
+        dataset['stoch_rsi_k'] = ta.momentum.StochRSIIndicator(close=ta_data[(coin + ':close')]).stochrsi_k()
+        dataset['uo'] = ta.momentum.UltimateOscillator(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')],
+                                                       close=ta_data[(coin + ':close')]).ultimate_oscillator()
+        dataset['adx'] = ta.trend.ADXIndicator(high=ta_data[(coin + ':high')], low=ta_data[(coin + ':low')],
+                                               close=ta_data[(coin + ':close')]).adx()
+        dataset['mass_index'] = ta.trend.MassIndex(high=ta_data[(coin + ':high')],
+                                                   low=ta_data[(coin + ':low')]).mass_index()
+        dataset['aroon_up'] = ta.trend.AroonIndicator(close=ta_data[(coin + ':close')]).aroon_up()
+        dataset['aroon_down'] = ta.trend.AroonIndicator(close=ta_data[(coin + ':close')]).aroon_down()
+        dataset['stc'] = ta.trend.STCIndicator(close=ta_data[(coin + ':close')]).stc()
 
         # Lot of NaN values
-        #ta.trend.PSARIndicator(high=df[(coin + ':high')], low=df[(coin + ':low')], close=df[(coin + ':close')]).psar_down()
+        # ta.trend.PSARIndicator(high=df[(coin + ':high')], low=df[(coin + ':low')], close=df[(coin + ':close')]).psar_down()
 
         dataset = dataset.add_prefix(coin + ":")
 
@@ -226,9 +240,9 @@ def start():
         feed.compile()
 
         # Print feed for debugging
-        #print(feed.next())
-        #print(feed.next())
-        #print(feed.next())
+        # print(feed.next())
+        # print(feed.next())
+        # print(feed.next())
 
         # === REWARDSCHEME === 
         # RiskAdjustedReturns rewards depends on return_algorithm and its parameters.
@@ -236,11 +250,11 @@ def start():
         # A target return is what an investor would want to make from any capital invested in the asset.
 
         # SimpleProfit() or RiskAdjustedReturns() or PBR()
-        #reward_scheme = RiskAdjustedReturns(return_algorithm='sortino')#, risk_free_rate=0, target_returns=0)
-        #reward_scheme = RiskAdjustedReturns(return_algorithm='sharpe', risk_free_rate=0, target_returns=0, window_size=config["window_size"])
+        # reward_scheme = RiskAdjustedReturns(return_algorithm='sortino')#, risk_free_rate=0, target_returns=0)
+        # reward_scheme = RiskAdjustedReturns(return_algorithm='sharpe', risk_free_rate=0, target_returns=0, window_size=config["window_size"])
 
-        reward_scheme = SimpleProfit(window_size=config["window_size"])      
-        #reward_scheme = PBR(price=p)
+        reward_scheme = SimpleProfit(window_size=config["window_size"])
+        # reward_scheme = PBR(price=p)
 
         # === ACTIONSCHEME ===
         # SimpleOrders() or ManagedRiskOrders() or BSH()
@@ -251,15 +265,15 @@ def start():
 
         action_scheme = ManagedRiskOrders(durations=[100])
 
-        #action_scheme = SimpleOrders()     
-        
-        #BSH only works with PBR as reward_scheme
-        #action_scheme = BSH(cash=cash,asset=asset).attach(reward_scheme) 
+        # action_scheme = SimpleOrders()
+
+        # BSH only works with PBR as reward_scheme
+        # action_scheme = BSH(cash=cash,asset=asset).attach(reward_scheme)
 
         # === RENDERER ===
-        # Uses the OHCLV data passed to envData
+        # Uses the OHCLV data passed to env_data
         renderer_feed = DataFeed(
-            [Stream.source(envData[c].tolist(), dtype="float").rename(c) for c in envData]
+            [Stream.source(env_data[c].tolist(), dtype="float").rename(c) for c in env_data]
         )
 
         # === RESULT === 
@@ -269,9 +283,9 @@ def start():
             action_scheme=action_scheme,
             reward_scheme=reward_scheme,
             renderer_feed=renderer_feed,
-            renderer= PlotlyTradingChart(),             #PositionChangeChart()
-            window_size=config["window_size"],          #part of OBSERVER
-            max_allowed_loss=config["max_allowed_loss"] #STOPPER
+            renderer=PlotlyTradingChart(),  # PositionChangeChart()
+            window_size=config["window_size"],  # part of OBSERVER
+            max_allowed_loss=config["max_allowed_loss"]  # STOPPER
         )
         return environment
 
@@ -292,7 +306,7 @@ def start():
     # 4. A3C    85k     85k
     # 5. DQN    80k     140k
     # 6. APPO   80k     75k
-    
+
     # SimpleProfit & ManagedRiskOrders(durations=[100]), amount = 1, maxIteration = 100, window_size = 10, max_allowed_loss = 0.95, gamma = 0, BAT 4h 900 rows of data
     #    ALGO   Net Worth
     # 4. PPO    421k    
@@ -323,66 +337,66 @@ def start():
     # Setting a high value results in quicker training time, but could result in overfitting
     # Needs to be bigger than 0.2 otherwise test environment will not render correctly.
     max_allowed_loss = 0.95
-    
+
     # === CONFIG FOR AGENT ===
     config = {
 
-    # === ENV Parameters === 
-    "env" : "TradingEnv",
-    "env_config" : {"window_size" : window_size,
-                    "max_allowed_loss" : max_allowed_loss,
-                    # Use the train set data
-                    "train" : True,
-                    },
-    
-    # === RLLib parameters ===
-    # https://docs.ray.io/en/master/rllib-training.html#common-parameters
+        # === ENV Parameters ===
+        "env": "TradingEnv",
+        "env_config": {"window_size": window_size,
+                       "max_allowed_loss": max_allowed_loss,
+                       # Use the train set data
+                       "train": True,
+                       },
 
-    # === Settings for Rollout Worker processes ===
-    # Number of rollout worker actors to create for parallel sampling. Setting
-    # this to 0 will force rollouts to be done in the trainer actor.
-    # Increasing this increases parallelism, but can result in OOM errors
-    #"num_workers" : 2,                     # Amount of CPU cores - 1
-    "num_gpus": 1,
+        # === RLLib parameters ===
+        # https://docs.ray.io/en/master/rllib-training.html#common-parameters
 
-    # === Environment Settings ===
-    # Discount factor of the MDP.
-    # Lower gamma values will put more weight on short-term gains, whereas higher gamma values will put more weight towards long-term gains. 
-    "gamma" : 0,       # default = 0.99
+        # === Settings for Rollout Worker processes ===
+        # Number of rollout worker actors to create for parallel sampling. Setting
+        # this to 0 will force rollouts to be done in the trainer actor.
+        # Increasing this increases parallelism, but can result in OOM errors
+        # "num_workers" : 2,                     # Amount of CPU cores - 1
+        "num_gpus": 1,
 
-    # Higher lr fits training model better, but causes overfitting  
-    #"lr" : 0.01,                           # default = 0.00005
+        # === Environment Settings ===
+        # Discount factor of the MDP.
+        # Lower gamma values will put more weight on short-term gains, whereas higher gamma values will put more weight towards long-term gains.
+        "gamma": 0.99,  # default = 0.99
 
-    #Decreases performance
-    #"clip_rewards": True, 
-    #"observation_filter": "MeanStdFilter",
-    #"lambda": 0.72,
-    #"vf_loss_coeff": 0.5,
+        # Higher lr fits training model better, but causes overfitting
+        # "lr" : 0.01,                           # default = 0.00005
 
-    #"entropy_coeff": 0.01,
-    #"batch_mode": "complete_episodes",
+        # Decreases performance
+        # "clip_rewards": True,
+        # "observation_filter": "MeanStdFilter",
+        # "lambda": 0.72,
+        # "vf_loss_coeff": 0.5,
 
-    # === Debug Settings ===
-    "log_level" : "WARN",                   # "WARN" or "DEBUG" for more info
-    "ignore_worker_failures" : True,
+        # "entropy_coeff": 0.01,
+        # "batch_mode": "complete_episodes",
 
-    # === Deep Learning Framework Settings ===
-    "framework" : "torch",                  # Can be tf, tfe and torch 
+        # === Debug Settings ===
+        "log_level": "DEBUG",  # "WARN" or "DEBUG" for more info
+        "ignore_worker_failures": True,
 
-    # === Custom Metrics === 
-    "callbacks": {"on_episode_end": get_net_worth},
+        # === Deep Learning Framework Settings ===
+        "framework": "torch",  # Can be tf, tfe and torch
 
-    # === LSTM parameters ===
-    # Currently not in use
-    # https://docs.ray.io/en/master/rllib-models.html#default-model-config-settings
-    "model" : {
-        "use_lstm" : lstm,                  # default = False
-        #"max_seq_len" : 10,                # default = 20
-        #"lstm_cell_size" : 32,             # default = 256
-        # Whether to feed a_{t-1} to LSTM (one-hot encoded if discrete).
-        #"lstm_use_prev_action": False,     # default = False
-        # Whether to feed r_{t-1} to LSTM.
-        #"lstm_use_prev_reward": False,     # default = False
+        # === Custom Metrics ===
+        "callbacks": {"on_episode_end": get_net_worth},
+
+        # === LSTM parameters ===
+        # Currently not in use
+        # https://docs.ray.io/en/master/rllib-models.html#default-model-config-settings
+        "model": {
+            "use_lstm": lstm,  # default = False
+            # "max_seq_len" : 10,                # default = 20
+            # "lstm_cell_size" : 32,             # default = 256
+            # Whether to feed a_{t-1} to LSTM (one-hot encoded if discrete).
+            # "lstm_use_prev_action": False,     # default = False
+            # Whether to feed r_{t-1} to LSTM.
+            # "lstm_use_prev_reward": False,     # default = False
         },
     }
 
@@ -397,52 +411,53 @@ def start():
         grace_period=10,
         reduction_factor=3,
         brackets=1
-       )
+    )
 
     # === tune.run for Training ===
     # https://docs.ray.io/en/master/tune/api_docs/execution.html
     analysis = tune.run(
         algo,
         # https://docs.ray.io/en/master/tune/api_docs/stoppers.html
-        #stop = ExperimentPlateauStopper(metric="episode_reward_mean", std=0.1, top=10, mode="max", patience=0),
-        stop = {"training_iteration": maxIter},
-        #stop = {"episode_len_mean" : trainLength - 1},
+        # stop = ExperimentPlateauStopper(metric="episode_reward_mean", std=0.1, top=10, mode="max", patience=0),
+        stop={"training_iteration": maxIter},
+        # stop = {"episode_len_mean" : train_length - 1},
         config=config,
         checkpoint_at_end=True,
-        metric = "episode_reward_mean",
-        mode = "max", 
-        checkpoint_freq = 1,  #Necesasry to declare, in combination with Stopper
-        checkpoint_score_attr = "episode_reward_mean",
-        #resume=True
-        #scheduler=asha_scheduler,
-        #max_failures=5,
+        metric="episode_reward_mean",
+        mode="max",
+        checkpoint_freq=1,  # Necesasry to declare, in combination with Stopper
+        checkpoint_score_attr="episode_reward_mean",
+        # resume=True
+        # scheduler=asha_scheduler,
+        # max_failures=5,
     )
 
     # === ANALYSIS FOR TESTING ===
     # https://docs.ray.io/en/master/tune/api_docs/analysis.html
     # Get checkpoint based on highest episode_reward_mean
-    checkpoint_path = analysis.get_best_checkpoint(trial=analysis.get_best_trial("episode_reward_mean"), metric="episode_reward_mean", mode="max") 
-    
+    checkpoint_path = analysis.get_best_checkpoint(trial=analysis.get_best_trial("episode_reward_mean"),
+                                                   metric="episode_reward_mean", mode="max")
+
     print("Checkpoint path at:")
     print(checkpoint_path)
 
     # === ALGORITHM SELECTION ===   
     # Get the correct trainer for the algorithm
-    if (algo == "IMPALA"):
-        algoTr = impala.ImpalaTrainer
-    if (algo == "PPO"):
-        algoTr = ppo.PPOTrainer
-    if (algo == "APPO"):
-        algoTr = appo.APPOTrainer
-    if (algo == "DQN"):
-        algoTr = dqn.DQNTrainer
-    if (algo == "A2C"):
-        algoTr = a2c.A2CTrainer
-    if (algo == "A3C"):
-        algoTr = a3c.A3CTrainer
+    if algo == "IMPALA":
+        algo_tr = impala.ImpalaTrainer
+    if algo == "PPO":
+        algo_tr = ppo.PPOTrainer
+    if algo == "APPO":
+        algo_tr = appo.APPOTrainer
+    if algo == "DQN":
+        algo_tr = dqn.DQNTrainer
+    if algo == "A2C":
+        algo_tr = a2c.A2CTrainer
+    if algo == "A3C":
+        algo_tr = a3c.A3CTrainer
 
     # === CREATE THE AGENT === 
-    agent = algoTr(
+    agent = algo_tr(
         env="TradingEnv",
         config=config,
     )
@@ -456,21 +471,22 @@ def start():
         "window_size": window_size,
         "max_allowed_loss": max_allowed_loss,
         # Use the test set data
-        "train" : False
+        "train": False
     })
 
     train_env = create_env({
         "window_size": window_size,
         "max_allowed_loss": max_allowed_loss,
         # Use the training set data
-        "train" : True
+        "train": True
     })
 
-    print(testData)
+    print(test_data)
 
     # === Render the environments ===
-    render_env(test_env, agent, lstm, testData, coin)
-    #render_env(train_env, agent, lstm, trainData)
+    render_env(test_env, agent, lstm, test_data, coin)
+    # render_env(train_env, agent, lstm, trainData)
+
 
 def render_env(env, agent, lstm, data, asset):
     # Run until done == True
@@ -489,19 +505,24 @@ def render_env(env, agent, lstm, data, asset):
     while not done:
         # Using LSTM
         if (lstm == True):
-            action, state, logit = agent.compute_action(observation=obs, prev_action=1.0, prev_reward = 0.0, state = state)
+            action, state, logit = agent.compute_action(observation=obs, prev_action=1.0, prev_reward=0.0, state=state)
         # Without LSTM
         else:
             action = agent.compute_action(obs)
         obs, reward, done, info = env.step(action)
+        print(f"obs: {obs}")
+        print(f"reward: {reward}")
+        print(f"done: {done}")
+        print(f"info: {info}")
         episode_reward += reward
 
         networth.append(info['net_worth'])
-    
+
     # Render the test environment
     env.render()
 
-    benchmark(comparison_list = networth, data_used = data, coin = asset)   
+    benchmark(comparison_list=networth, data_used=data, coin=asset)
+
 
 # === CALLBACK ===
 def get_net_worth(info):
@@ -510,6 +531,7 @@ def get_net_worth(info):
     episode = info["episode"]
     # DeprecationWarning: `callbacks dict interface` has been deprecated. Use `a class extending rllib.agents.callbacks.DefaultCallbacks` instead. 
     episode.custom_metrics["net_worth"] = episode.last_info_for()["net_worth"]
+
 
 if __name__ == '__main__':
     # To prevent CUDNN_STATUS_ALLOC_FAILED error
