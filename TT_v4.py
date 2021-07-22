@@ -250,10 +250,10 @@ def start():
         # A target return is what an investor would want to make from any capital invested in the asset.
 
         # SimpleProfit() or RiskAdjustedReturns() or PBR()
-        # reward_scheme = RiskAdjustedReturns(return_algorithm='sortino')#, risk_free_rate=0, target_returns=0)
+        reward_scheme = RiskAdjustedReturns(return_algorithm='sortino')#, risk_free_rate=0, target_returns=0)
         # reward_scheme = RiskAdjustedReturns(return_algorithm='sharpe', risk_free_rate=0, target_returns=0, window_size=config["window_size"])
 
-        reward_scheme = SimpleProfit(window_size=config["window_size"])
+        # reward_scheme = SimpleProfit(window_size=config["window_size"])
         # reward_scheme = PBR(price=p)
 
         # === ACTIONSCHEME ===
@@ -362,7 +362,7 @@ def start():
         # === Environment Settings ===
         # Discount factor of the MDP.
         # Lower gamma values will put more weight on short-term gains, whereas higher gamma values will put more weight towards long-term gains.
-        "gamma": 0.99,  # default = 0.99
+        "gamma": 0,  # default = 0.99
 
         # Higher lr fits training model better, but causes overfitting
         # "lr" : 0.01,                           # default = 0.00005
@@ -509,6 +509,7 @@ def render_env(env, agent, lstm, data, asset):
         # Without LSTM
         else:
             action = agent.compute_action(obs)
+            print(f"action: {action}")
         obs, reward, done, info = env.step(action)
         print(f"obs: {obs}")
         print(f"reward: {reward}")
